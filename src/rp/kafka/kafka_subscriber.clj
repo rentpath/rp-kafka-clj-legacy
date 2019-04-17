@@ -50,12 +50,10 @@
                     :partition (.partition rec)
                     :offset (.offset rec)
                     :timestamp (.timestamp rec)}]
-          ;; FIXME: switch to this style after initial alert-service migration
-          #_(record-callback {:component component
+          (record-callback {:component component
                             :k k
                             :v v
-                            :meta meta})
-          (record-callback component k v meta))
+                            :meta meta}))
         (catch Throwable t
           (common/report-throwable component t "Caught exception handling record" {:rec rec}))))
     (when (seq recs)
@@ -92,9 +90,8 @@
 
 (comment
   (defn callback
-    ;; FIXME: update to expect single map arg...
-    [comp k v meta]
-    (log/info "demo callback" {:comp comp :k k :v v :meta meta}))
+    [{:keys [k v meta component] :as args}]
+    (log/info "demo callback" args))
 
   (def sub (map->KafkaSubscriber
             {:bootstrap-servers "kafka:9092"
