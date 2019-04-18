@@ -1,4 +1,4 @@
-(defproject rp-kafka-clj "0.0.0-SNAPSHOT"
+(defproject rp-kafka-clj "0.0.1-SNAPSHOT"
   :description "Generic Clojure Kafka components and utils"
   :url "https://gitthub.com/rentpath/rp-kafka-clj"
   :license {:name "Eclipse Public License"
@@ -16,5 +16,4 @@
                                      :username [:gpg :env/CLOJARS_USERNAME]
                                      :password [:gpg :env/CLOJARS_PASSWORD]
                                      :sign-releases false}]]
-  :global-vars {*warn-on-reflection* true}
   :java-source-paths ["src/java"])
