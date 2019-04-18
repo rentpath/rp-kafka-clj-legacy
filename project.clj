@@ -16,5 +16,4 @@
                                      :username [:gpg :env/CLOJARS_USERNAME]
                                      :password [:gpg :env/CLOJARS_PASSWORD]
                                      :sign-releases false}]]
-  :global-vars {*warn-on-reflection* true}
   :java-source-paths ["src/java"])
