@@ -8,6 +8,6 @@ FIXME
 
 ## License
 
-The MIT License
-
 Copyright © 2019 RentPath, LLC
+
+Distributed under the Eclipse Public License either version 1.0 or (at your option) any later version.
