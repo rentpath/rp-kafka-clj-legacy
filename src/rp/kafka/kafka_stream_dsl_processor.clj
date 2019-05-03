@@ -1,8 +1,11 @@
+;; FIXME: If I del kafka-stream-processor (low), rename this without `dsl-`
 (ns rp.kafka.kafka-stream-dsl-processor
   (:require [com.stuartsierra.component :as component]
             [clojure.tools.logging :as log]
             [rp.kafka.avro :as avro]
-            [rp.kafka.common :as common])
+            [rp.kafka.common :as common]
+            [rp.kafka.kafka-state-store :as store]
+            [rp.kafka.kafka-transformer :as transformer])
   (:import [org.apache.kafka.common.serialization Serdes]
            [org.apache.kafka.streams KafkaStreams StreamsBuilder StreamsConfig Topology KeyValue]
            [org.apache.kafka.streams.errors DeserializationExceptionHandler LogAndContinueExceptionHandler]
@@ -145,6 +148,25 @@
                        (doto (GenericPrimitiveAvroSerde.)
                          (.configure config false)))))
 
+
+(defn- str-array
+  "Helper for passing a vararg of non-nil Strings to a Java method."
+  [& strings]
+  (into-array String (filter identity strings)))
+
+(defn transform
+  [kstream component transformer-key]
+  (.transform kstream
+              (transformer/transformer-supplier component transformer-key)
+              (str-array (get-in component [:transformers transformer-key :store-name]))))
+
+(defn- add-state-stores
+  [{:keys [transformers] :as component} builder]
+  (let [store-names (keep :store-name (vals transformers))]
+    (doseq [store-name store-names]
+      (.addStateStore builder (store/state-store-builder store-name)))
+    builder))
+
 (defrecord KafkaStreamDslProcessor [bootstrap-servers schema-registry-url app-id input-topics process-input-stream auto-register-schemas?]
   component/Lifecycle
   (start [this]
@@ -160,7 +182,7 @@
                    (.setProperty StreamsConfig/DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG (.getName LogAndContinueExceptionHandler))
                    (.setProperty AbstractKafkaAvroSerDeConfig/SCHEMA_REGISTRY_URL_CONFIG schema-registry-url)
                    (.setProperty AbstractKafkaAvroSerDeConfig/AUTO_REGISTER_SCHEMAS (str (boolean auto-register-schemas?))))
-          builder (StreamsBuilder.)
+          builder (add-state-stores this (StreamsBuilder.))
           input-stream (.stream builder input-topics)
           ;; The following mutates the builder as a side-effect.
           _ (process-input-stream this input-stream)

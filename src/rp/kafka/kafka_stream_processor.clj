@@ -6,12 +6,11 @@
   (:require [com.stuartsierra.component :as component]
             [clojure.tools.logging :as log]
             [rp.kafka.avro :as avro]
+            [rp.kafka.kafka-state-store :as store]
             [rp.kafka.common :as common])
-  (:import [org.apache.kafka.common.serialization Serdes]
-           [org.apache.kafka.streams KafkaStreams StreamsConfig Topology]
+  (:import [org.apache.kafka.streams KafkaStreams StreamsConfig Topology]
            [org.apache.kafka.streams.errors DeserializationExceptionHandler LogAndContinueExceptionHandler]
            [org.apache.kafka.streams.processor Processor ProcessorContext ProcessorSupplier]
-           [org.apache.kafka.streams.state Stores]
            GenericPrimitiveAvroSerde
            [io.confluent.kafka.serializers AbstractKafkaAvroSerDeConfig KafkaAvroDeserializer]
            [java.util Properties]))
@@ -20,14 +19,6 @@
   "Helper for passing a vararg of Strings to a Java method."
   [& strings]
   (into-array String strings))
-
-(defn state-store-builder
-  "Returns a builder for a persistent store with the specified name. The store keys and values are both strings."
-  [store-name]
-  (Stores/keyValueStoreBuilder
-   (Stores/persistentKeyValueStore store-name)
-   (Serdes/String)
-   (Serdes/String)))
 
 (defn process-record
   [component context state-store {:keys [k v meta] :as rec}]
@@ -71,6 +62,11 @@
     ;; https://issues.apache.org/jira/browse/KAFKA-4919
     ))
 
+(defn processor-supplier
+  [component]
+  (reify ProcessorSupplier
+    (get [_] (->CustomProcessor component nil nil))))
+
 (defrecord KafkaStreamProcessor [bootstrap-servers schema-registry-url app-id input-topics output-topic output-key-schema output-value-schema record-callback store-name auto-register-schemas?]
   component/Lifecycle
   (start [this]
@@ -89,12 +85,11 @@
           topology (-> (Topology.)
                        (.addSource "Source" (apply str-array input-topics))
                        (.addProcessor "Process"
-                                      (reify ProcessorSupplier
-                                        (get [_] (->CustomProcessor this nil nil)))
+                                      (processor-supplier this)
                                       (str-array "Source"))
                        (.addSink "Sink" output-topic (str-array "Process")))
           topology (cond-> topology
-                     store-name (.addStateStore (state-store-builder store-name)
+                     store-name (.addStateStore (store/state-store-builder store-name)
                                                 (str-array "Process")))
           streams (KafkaStreams. topology config)]
       (.start streams)
