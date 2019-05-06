@@ -1,5 +1,4 @@
-;; FIXME: If I del kafka-stream-processor (low), rename this without `dsl-`
-(ns rp.kafka.kafka-stream-dsl-processor
+(ns rp.kafka.kafka-stream-processor
   (:require [com.stuartsierra.component :as component]
             [clojure.tools.logging :as log]
             [rp.kafka.avro :as avro]
@@ -167,7 +166,7 @@
       (.addStateStore builder (store/state-store-builder store-name)))
     builder))
 
-(defrecord KafkaStreamDslProcessor [bootstrap-servers schema-registry-url app-id input-topics process-input-stream auto-register-schemas?]
+(defrecord KafkaStreamProcessor [bootstrap-servers schema-registry-url app-id input-topics process-input-stream auto-register-schemas?]
   component/Lifecycle
   (start [this]
     ;; Ugh; KafkaStreams constructor requires Properties for config
