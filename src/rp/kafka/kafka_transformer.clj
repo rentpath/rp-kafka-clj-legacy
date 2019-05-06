@@ -1,7 +1,17 @@
 (ns rp.kafka.kafka-transformer
   "Clojure wrapper for use with the Stream DSL `.transform` method via the DSL component's `transform` function.
-  Supports an optional state store.
-  FIXME: Expand this doc string."
+  Wraps a record-callback (that takes one input record and returns a collection of 0-N output records.
+  Supports an optional state store which can be accessed in record-callback using the KVStore protocol from rp.kafka.kafka-state-store.
+  Usage:
+  Inside your Stream processor's process-input-stream function you can call
+  rp.kafka.kafka-stream-processor/transform
+  passing the component and a keyword identifying one of the
+  transformers you define in the component's `transformers` config map.
+  Each entry in that is a submap with the keys:
+  :output-key-schema - Avro schema for output record keys
+  :output-value-schema - Avro schema for output record values
+  :state-store - Name for the state store to create/use (optional)
+  :record-callback - A function that takes a map representing an input record with the keys [:k :v :meta :component :state-store] and returns a sequence of output records each represented by a map with the keys [:k :v]."
   (:require [clojure.tools.logging :as log]
             [rp.kafka.avro :as avro]
             [rp.kafka.common :as common])
