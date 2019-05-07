@@ -24,7 +24,7 @@
   (into-array String strings))
 
 (defn transform-record
-  [component transformer-config context state-store {:keys [k v meta] :as rec}]
+  [component transformer-config ^ProcessorContext context state-store {:keys [k v meta] :as rec}]
   (let [{:keys [record-callback output-key-schema output-value-schema]} transformer-config]
     (log/info {:rec rec})               ; FIXME: del eventually
     (try
@@ -43,7 +43,7 @@
 
 (deftype CustomTransformer [component
                             transformer-config
-                            ^{:volatile-mutable true} context
+                            ^{:volatile-mutable true} ^ProcessorContext context
                             ^{:volatile-mutable true} state-store]
   Transformer
 

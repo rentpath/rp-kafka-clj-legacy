@@ -5,9 +5,9 @@
             [rp.kafka.publisher :as publisher]
             [rp.kafka.avro :as avro]
             [rp.kafka.common :as common])
-  (:import [org.apache.kafka.clients.producer Callback KafkaProducer ProducerConfig ProducerRecord]
+  (:import [org.apache.kafka.clients.producer Callback KafkaProducer Producer ProducerConfig ProducerRecord]
            [io.confluent.kafka.serializers AbstractKafkaAvroSerDeConfig KafkaAvroSerializer]
-           [java.util Properties]))
+           [java.util Map]))
 
 (defn report-success [component k v metadata]
   ;; Call success-callback (when specified)
@@ -17,7 +17,7 @@
 ;; A helper for multiple artity protocol method.
 (defn- publish*
   [{:keys [topic key-schema value-schema producer] :as component} k v {:keys [partition] :as opts}]
-  (.send producer
+  (.send ^Producer producer
          (let [k-payload (and k (avro/->java key-schema k))
                v-payload (and v (avro/->java value-schema v))]
            (if partition
@@ -37,12 +37,12 @@
                   ProducerConfig/VALUE_SERIALIZER_CLASS_CONFIG KafkaAvroSerializer
                   AbstractKafkaAvroSerDeConfig/SCHEMA_REGISTRY_URL_CONFIG schema-registry-url
                   AbstractKafkaAvroSerDeConfig/AUTO_REGISTER_SCHEMAS auto-register-schemas?}
-          producer (KafkaProducer. config)]
+          producer (KafkaProducer. ^Map config)]
       (assoc this :producer producer)))
   (stop [{:keys [producer] :as this}]
     (when producer
-      (.flush producer)
-      (.close producer))
+      (.flush ^Producer producer)
+      (.close ^Producer producer))
     (dissoc this :producer))
 
   publisher/Publisher

@@ -12,7 +12,8 @@
            [org.apache.kafka.streams.kstream KStream Printed Initializer Aggregator Merger TimeWindows SessionWindows KeyValueMapper Suppressed Suppressed$BufferConfig Materialized Predicate]
            GenericPrimitiveAvroSerde
            [io.confluent.kafka.serializers AbstractKafkaAvroSerDeConfig KafkaAvroDeserializer]
-           [java.util Properties]))
+           [java.time Duration]
+           [java.util Collection Properties]))
 
 ;;
 ;; Handy stuff "borrowed" from https://github.com/FundingCircle/jackdaw/blob/master/src/jackdaw/streams/lambdas.clj
@@ -114,7 +115,7 @@
 
 (defn time-windows
   ;; Hopping (overlapping) windows, where advance-by-duration is less than window-duration.
-  ([window-duration advance-by-duration]
+  ([^Duration window-duration ^Duration advance-by-duration]
    (let [windows (TimeWindows/of window-duration)]
      (if advance-by-duration
        (.advanceBy windows advance-by-duration)
@@ -124,7 +125,7 @@
    (time-windows window-duration nil)))
 
 (defn session-windows
-  [inactivity-duration]
+  [^Duration inactivity-duration]
   (SessionWindows/with inactivity-duration))
 
 ;; Returns a value for passing to KTable#suppress method
@@ -154,13 +155,13 @@
   (into-array String (filter identity strings)))
 
 (defn transform
-  [kstream component transformer-key]
+  [^KStream kstream component transformer-key]
   (.transform kstream
               (transformer/transformer-supplier component transformer-key)
               (str-array (get-in component [:transformers transformer-key :store-name]))))
 
 (defn- add-state-stores
-  [{:keys [transformers] :as component} builder]
+  [{:keys [transformers] :as component} ^StreamsBuilder builder]
   (let [store-names (keep :store-name (vals transformers))]
     (doseq [store-name store-names]
       (.addStateStore builder (store/state-store-builder store-name)))
@@ -181,8 +182,8 @@
                    (.setProperty StreamsConfig/DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG (.getName LogAndContinueExceptionHandler))
                    (.setProperty AbstractKafkaAvroSerDeConfig/SCHEMA_REGISTRY_URL_CONFIG schema-registry-url)
                    (.setProperty AbstractKafkaAvroSerDeConfig/AUTO_REGISTER_SCHEMAS (str (boolean auto-register-schemas?))))
-          builder (add-state-stores this (StreamsBuilder.))
-          input-stream (.stream builder input-topics)
+          builder ^StreamsBuilder (add-state-stores this (StreamsBuilder.))
+          input-stream (.stream builder ^Collection input-topics)
           ;; The following mutates the builder as a side-effect.
           _ (process-input-stream this input-stream)
           topology (.build builder)
@@ -191,7 +192,7 @@
       (assoc this :streams streams)))
   (stop [this]
     (try
-      (.close (:streams this))
+      (.close ^KafkaStreams (:streams this))
       (catch Throwable t
         (common/report-throwable this t "Caught exception closing streams" {:app-id app-id})))
     this))

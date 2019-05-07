@@ -3,14 +3,14 @@
             [clojure.tools.logging :as log]
             [rp.kafka.avro :as avro]
             [rp.kafka.common :as common])
-  (:import [org.apache.kafka.clients.consumer KafkaConsumer ConsumerConfig ConsumerRecords]
+  (:import [org.apache.kafka.clients.consumer KafkaConsumer ConsumerConfig ConsumerRecord ConsumerRecords]
            [org.apache.kafka.common TopicPartition]
            [org.apache.kafka.common.errors SerializationException]
            [io.confluent.kafka.serializers AbstractKafkaAvroSerDeConfig KafkaAvroDeserializer]
-           [java.util Properties]))
+           [java.util Collection Map]))
 
 (defn seek-past-error
-  [consumer e]
+  [^KafkaConsumer consumer ^Exception e]
   ;; Annoyingly the exception doesn't provide the details as data so we have to parse the error message.
   ;; Example message: "Error deserializing key/value for partition foo-0 at offset 2. If needed, please seek past the record to continue consumption."
   (let [msg (.getMessage e)
@@ -24,7 +24,7 @@
       (throw (ex-info "Failed to parse serialization error; can't seek past bad message." {:msg msg})))))
 
 (defn fetch-records
-  [{:keys [consumer poll-timeout-ms] :as component}]
+  [{:keys [^KafkaConsumer consumer ^Long poll-timeout-ms] :as component}]
   (try (vec (.poll consumer poll-timeout-ms))
        (catch SerializationException e
          (common/report-throwable component e "Caught SerializationException calling .poll")
@@ -32,7 +32,7 @@
          [])))
 
 (defn commit-offsets
-  [{:keys [consumer] :as component}]
+  [{:keys [^KafkaConsumer consumer] :as component}]
   (try
     (.commitSync consumer)
     (catch Throwable t
@@ -41,7 +41,7 @@
 (defn poll
   [{:keys [consumer record-callback] :as component}]
   (let [recs (fetch-records component)]
-    (doseq [rec recs]
+    (doseq [^ConsumerRecord rec recs]
       (log/info {:rec rec}) ; FIXME: del eventually
       (try
         (let [k (.key rec)
@@ -69,13 +69,13 @@
                   AbstractKafkaAvroSerDeConfig/SCHEMA_REGISTRY_URL_CONFIG schema-registry-url
                   ConsumerConfig/AUTO_OFFSET_RESET_CONFIG "latest"
                   ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG false}
-          consumer (KafkaConsumer. config)
+          consumer ^KafkaConsumer (KafkaConsumer. ^Map config)
           component (assoc this
                            :consumer consumer
                            :running? (atom true))]
       (assoc component :poll-loop-future
              (future (try
-                       (.subscribe consumer topics)
+                       (.subscribe consumer ^Collection topics)
                        (while @(:running? component) (poll component))
                        (catch Throwable t
                          (common/report-throwable component t "Caught exception running poll loop")))

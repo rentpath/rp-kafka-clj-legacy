@@ -7,6 +7,7 @@
 (ns rp.kafka.avro
   (:require [clojure.string :as str])
   (:import [java.nio ByteBuffer]
+           [java.util Collection]
            [org.apache.avro.generic
             GenericData
             GenericData$Record
@@ -14,7 +15,7 @@
             GenericData$Fixed
             GenericData$EnumSymbol]
            [org.apache.avro.util Utf8]
-           [org.apache.avro Schema Schema$Type]))
+           [org.apache.avro Schema Schema$Type Schema$Field]))
 
 (defn avro-friendly-name
   [k]
@@ -28,7 +29,7 @@
 
 (defn parse-schema
   "A little helper for parsing schemas"
-  [json]
+  [^String json]
   (Schema/parse json))
 
 (defn ->java
@@ -37,7 +38,7 @@
    Hyphens in keys will be replaced with underscores, since hyphens are not
    valid in Avro names."
   [schema obj]
-  (condp = (and (instance? Schema schema) (.getType schema))
+  (condp = (and (instance? Schema schema) (.getType ^Schema schema))
     Schema$Type/NULL
     (if (nil? obj)
       nil
@@ -76,29 +77,29 @@
     Schema$Type/BYTES
     (if (bytes? obj)
       (doto (ByteBuffer/allocate (count obj))
-        (.put obj)
+        (.put (bytes obj))
         (.position 0))
       (throw-invalid-type schema obj))
 
     Schema$Type/ARRAY ;; TODO Exception for complex type
-    (let [f (partial ->java (.getElementType schema))]
-      (GenericData$Array. schema (map f obj)))
+    (let [f (partial ->java (.getElementType ^Schema schema))]
+      (GenericData$Array. ^Schema schema ^Collection (map f obj)))
 
     Schema$Type/FIXED
-    (if (and (bytes? obj) (= (count obj) (.getFixedSize schema)))
+    (if (and (bytes? obj) (= (count obj) (.getFixedSize ^Schema schema)))
       (GenericData$Fixed. schema obj)
       (throw-invalid-type schema obj))
 
     Schema$Type/ENUM
     (let [enum (name obj)
-          enums (into #{} (.getEnumSymbols schema))]
+          enums (into #{} (.getEnumSymbols ^Schema schema))]
       (if (contains? enums enum)
-        (GenericData$EnumSymbol. schema enum)
+        (GenericData$EnumSymbol. ^Schema schema ^String enum)
         (throw-invalid-type schema enum)))
 
     Schema$Type/MAP ;; TODO Exception for complex type
     (zipmap (map avro-friendly-name (keys obj))
-            (map (partial ->java (.getValueType schema))
+            (map (partial ->java (.getValueType ^Schema schema))
                  (vals obj)))
 
     Schema$Type/UNION
@@ -109,7 +110,7 @@
                       (catch Exception _
                         [nil false])))
                   [nil false]
-                  (.getTypes schema))]
+                  (.getTypes ^Schema schema))]
       (if matched
         val
         (throw-invalid-type schema obj)))
@@ -117,11 +118,11 @@
     Schema$Type/RECORD
     (reduce-kv
      (fn [record k v]
-       (let [k (avro-friendly-name k)
-             s (some-> (.getField schema k)
-                       (as-> f (.schema f)))]
-         (doto record
-           (.put k (->java (or s k) v)))))
+       (let [k ^String (avro-friendly-name k)
+             s ^Schema (some-> (.getField ^Schema schema k)
+                       (as-> f (.schema ^Schema$Field f)))]
+         (doto ^GenericData$Record record
+           (.put ^String k ^Object (->java (or s k) v)))))
      (GenericData$Record. schema)
      obj)
 
@@ -137,13 +138,13 @@
     (str msg)
 
     java.nio.ByteBuffer
-    (.array msg)
+    (.array ^ByteBuffer msg)
 
     GenericData$Array
     (into [] (map ->clj msg))
 
     GenericData$Fixed
-    (.bytes msg)
+    (.bytes ^GenericData$Fixed msg)
 
     GenericData$EnumSymbol
     (keyword (str msg))
@@ -153,10 +154,10 @@
             (map ->clj (vals msg)))
 
     GenericData$Record
-    (loop [fields (seq (.. msg getSchema getFields)) record {}]
+    (loop [fields (seq (.. ^GenericData$Record msg getSchema getFields)) record {}]
       (if-let [f (first fields)]
-        (let [n (.name f)
-              v (->clj (.get msg n))
+        (let [n (.name ^Schema$Field f)
+              v (->clj (.get ^GenericData$Record msg n))
               k (keyword n)]
           (recur (rest fields)
                  (assoc record k v)))
