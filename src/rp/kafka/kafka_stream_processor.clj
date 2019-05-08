@@ -1,77 +1,173 @@
-;; FIXME: Consider refactoring/deprecating; one could use Kstream's `process` method with a DSL stream processor instead.
-;; See https://kafka.apache.org/21/javadoc/org/apache/kafka/streams/kstream/KStream.html#process-org.apache.kafka.streams.processor.ProcessorSupplier-java.lang.String...-
 (ns rp.kafka.kafka-stream-processor
-  "A Stream Processor component (using the lower-level Processor API, not the DSL API).
-  Note that (at least for now) this wraps a simple topology with a single source (which may be multiple topics), a single processor (with optional state store) and a single sink topic."
   (:require [com.stuartsierra.component :as component]
             [clojure.tools.logging :as log]
             [rp.kafka.avro :as avro]
-            [rp.kafka.common :as common])
+            [rp.kafka.common :as common]
+            [rp.kafka.kafka-state-store :as store]
+            [rp.kafka.kafka-transformer :as transformer])
   (:import [org.apache.kafka.common.serialization Serdes]
-           [org.apache.kafka.streams KafkaStreams StreamsConfig Topology]
+           [org.apache.kafka.streams KafkaStreams StreamsBuilder StreamsConfig Topology KeyValue]
            [org.apache.kafka.streams.errors DeserializationExceptionHandler LogAndContinueExceptionHandler]
            [org.apache.kafka.streams.processor Processor ProcessorContext ProcessorSupplier]
-           [org.apache.kafka.streams.state Stores]
+           [org.apache.kafka.streams.kstream KStream Printed Initializer Aggregator Merger TimeWindows SessionWindows KeyValueMapper Suppressed Suppressed$BufferConfig Materialized Predicate]
            GenericPrimitiveAvroSerde
            [io.confluent.kafka.serializers AbstractKafkaAvroSerDeConfig KafkaAvroDeserializer]
-           [java.util Properties]))
+           [java.time Duration]
+           [java.util Collection Properties]))
 
-(defn str-array
-  "Helper for passing a vararg of Strings to a Java method."
+;;
+;; Handy stuff "borrowed" from https://github.com/FundingCircle/jackdaw/blob/master/src/jackdaw/streams/lambdas.clj
+;;
+
+(defn key-value
+  "A key-value pair defined for a single Kafka Streams record."
+  [[key value]]
+  (KeyValue. key value))
+
+(deftype FnInitializer [initializer-fn]
+  Initializer
+  (apply [this]
+    (initializer-fn)))
+
+(defn initializer
+  "Packages up a Clojure fn in a kstream Initializer."
+  ^Initializer [initializer-fn]
+  (FnInitializer. initializer-fn))
+
+(deftype FnAggregator [aggregator-fn]
+  Aggregator
+  (apply [this agg-key value aggregate]
+    (aggregator-fn aggregate [agg-key value])))
+
+(defn aggregator
+  "Packages up a Clojure fn in a kstream Aggregator."
+  ^Aggregator [aggregator-fn]
+  (FnAggregator. aggregator-fn))
+
+(deftype FnKeyValueMapper [key-value-mapper-fn]
+  KeyValueMapper
+  (apply [this key value]
+    (key-value (key-value-mapper-fn [key value]))))
+
+(defn key-value-mapper
+  "Packages up a Clojure fn in a kstream key value mapper."
+  [key-value-mapper-fn]
+  (FnKeyValueMapper. key-value-mapper-fn))
+
+(deftype FnPredicate [predicate-fn]
+  Predicate
+  (test [this key value]
+    (boolean (predicate-fn [key value]))))
+
+(defn predicate
+  "Packages up a Clojure fn in a kstream predicate."
+  [predicate-fn]
+  (FnPredicate. predicate-fn))
+
+;;
+;; End of jackdaw stuff
+;;
+
+;; Note: Jackdaw doesn't include a wrapper for Merger (for aggregating session windows), so let's add it.
+(deftype FnMerger [merger-fn]
+  Merger
+  (apply [this agg-key aggregate1 aggregate2]
+    (merger-fn agg-key aggregate1 aggregate2)))
+
+(defn merger
+  "Packages up a Clojure fn in a kstream Merger"
+  ^Merger [merger-fn]
+  (FnMerger. merger-fn))
+
+;;
+;; Wrappers that deal with Avro schema serde concerns for us.
+;;
+
+(defn avro-initializer
+  [agg-schema initializer-fn]
+  (initializer
+   (fn []
+     (let [init-agg (initializer-fn)]
+       (log/info "in initializer" {:init-agg init-agg}) ; FIXME: del eventually
+       (avro/->java agg-schema init-agg)))))
+
+(defn avro-aggregator
+  [agg-schema aggregator-fn]
+  (aggregator
+   (fn [agg [k v]]
+     (let [k (and k (avro/->clj k))
+           v (and v (avro/->clj v))
+           agg (and agg (avro/->clj agg))
+           new-agg (aggregator-fn agg [k v])]
+       (log/info "in aggregator" {:k k :v v :agg agg :new-agg new-agg}) ; FIXME: del eventually
+       (avro/->java agg-schema new-agg)))))
+
+(defn avro-merger
+  [agg-schema merger-fn]
+  (merger
+   (fn [k agg1 agg2]
+     (let [k (and k (avro/->clj k))
+           agg1 (and agg1 (avro/->clj agg1))
+           agg2 (and agg2 (avro/->clj agg2))
+           new-agg (merger-fn k agg1 agg2)]
+       (log/info "in merger" {:k k :agg1 agg1 :agg2 agg2 :new-agg new-agg}) ; FIXME: del eventually
+       (avro/->java agg-schema new-agg)))))
+
+(defn time-windows
+  ;; Hopping (overlapping) windows, where advance-by-duration is less than window-duration.
+  ([^Duration window-duration ^Duration advance-by-duration]
+   (let [windows (TimeWindows/of window-duration)]
+     (if advance-by-duration
+       (.advanceBy windows advance-by-duration)
+       windows)))
+  ;; Tumbling (non-overlapping, gap-less) windows, where advance-by-duration is the same as window-duration.
+  ([window-duration]
+   (time-windows window-duration nil)))
+
+(defn session-windows
+  [^Duration inactivity-duration]
+  (SessionWindows/with inactivity-duration))
+
+;; Returns a value for passing to KTable#suppress method
+;; See https://kafka.apache.org/21/javadoc/org/apache/kafka/streams/kstream/Suppressed.html#untilWindowCloses-org.apache.kafka.streams.kstream.Suppressed.StrictBufferConfig-
+;; https://cwiki.apache.org/confluence/display/KAFKA/KIP-328%3A+Ability+to+suppress+updates+for+KTables
+;; FIXME: When "spill to disk" buffer config is available, use that instead of "unbounded".
+;; https://issues.apache.org/jira/browse/KAFKA-7224
+(defn suppressed-until-window-closes
+  []
+  (Suppressed/untilWindowCloses
+   (Suppressed$BufferConfig/unbounded)))
+
+;; Returns a value to pass as explicit Materialized arg to stateful transformations (like aggregate). Seems to be necessary (at least with kafka-streams 2.1.0) when using `suppress`.
+;; See https://stackoverflow.com/a/54115693/11023580
+(defn materialized-with-avro
+  [schema-registry-url]
+  (let [config {AbstractKafkaAvroSerDeConfig/SCHEMA_REGISTRY_URL_CONFIG schema-registry-url}]
+    (Materialized/with (doto (GenericPrimitiveAvroSerde.)
+                         (.configure config true))
+                       (doto (GenericPrimitiveAvroSerde.)
+                         (.configure config false)))))
+
+
+(defn- str-array
+  "Helper for passing a vararg of non-nil Strings to a Java method."
   [& strings]
-  (into-array String strings))
+  (into-array String (filter identity strings)))
 
-(defn state-store-builder
-  "Returns a builder for a persistent store with the specified name. The store keys and values are both strings."
-  [store-name]
-  (Stores/keyValueStoreBuilder
-   (Stores/persistentKeyValueStore store-name)
-   (Serdes/String)
-   (Serdes/String)))
+(defn transform
+  [^KStream kstream component transformer-key]
+  (.transform kstream
+              (transformer/transformer-supplier component transformer-key)
+              (str-array (get-in component [:transformers transformer-key :store-name]))))
 
-(defn process-record
-  [component context state-store {:keys [k v meta] :as rec}]
-  (let [{:keys [record-callback output-key-schema output-value-schema]} component]
-    (log/info {:rec rec})               ; FIXME: del eventually
-    (try
-      (let [output-recs (record-callback {:k (and k (avro/->clj k))
-                                          :v (and v (avro/->clj v))
-                                          :meta meta
-                                          :component component
-                                          :state-store state-store})]
-        (doseq [{:keys [k v] :as rec-out} output-recs]
-          (log/info {:rec-out rec-out}) ; FIXME: del eventually
-          (.forward context
-                    (and k (avro/->java output-key-schema k))
-                    (and v (avro/->java output-value-schema v)))))
-      (catch Throwable t
-        (common/report-throwable component t "Caught exception handling record" {:rec rec})))))
+(defn- add-state-stores
+  [{:keys [transformers] :as component} ^StreamsBuilder builder]
+  (let [store-names (keep :store-name (vals transformers))]
+    (doseq [store-name store-names]
+      (.addStateStore builder (store/state-store-builder store-name)))
+    builder))
 
-(deftype CustomProcessor [component
-                          ^{:volatile-mutable true} context
-                          ^{:volatile-mutable true} state-store]
-  Processor
-
-  (^void init [this ^ProcessorContext c]
-   (set! context c)
-   (when-let [store-name (:store-name component)]
-     (set! state-store (.getStateStore context store-name))))
-
-  (process [this k v]
-    (let [meta {:topic (.topic context)
-                :partition (.partition context)
-                :offset (.offset context)
-                :timestamp (.timestamp context)}
-          rec {:k k :v v :meta meta}]
-      (process-record component context state-store rec)))
-
-  (close [this]
-    ;; No-op (just defined to satisfy interface)
-    ;; Used to close state store here, but learned the hard way that we shouldn't bother to close the store.
-    ;; https://issues.apache.org/jira/browse/KAFKA-4919
-    ))
-
-(defrecord KafkaStreamProcessor [bootstrap-servers schema-registry-url app-id input-topics output-topic output-key-schema output-value-schema record-callback store-name auto-register-schemas?]
+(defrecord KafkaStreamProcessor [bootstrap-servers schema-registry-url app-id input-topics process-input-stream auto-register-schemas?]
   component/Lifecycle
   (start [this]
     ;; Ugh; KafkaStreams constructor requires Properties for config
@@ -86,22 +182,17 @@
                    (.setProperty StreamsConfig/DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG (.getName LogAndContinueExceptionHandler))
                    (.setProperty AbstractKafkaAvroSerDeConfig/SCHEMA_REGISTRY_URL_CONFIG schema-registry-url)
                    (.setProperty AbstractKafkaAvroSerDeConfig/AUTO_REGISTER_SCHEMAS (str (boolean auto-register-schemas?))))
-          topology (-> (Topology.)
-                       (.addSource "Source" (apply str-array input-topics))
-                       (.addProcessor "Process"
-                                      (reify ProcessorSupplier
-                                        (get [_] (->CustomProcessor this nil nil)))
-                                      (str-array "Source"))
-                       (.addSink "Sink" output-topic (str-array "Process")))
-          topology (cond-> topology
-                     store-name (.addStateStore (state-store-builder store-name)
-                                                (str-array "Process")))
+          builder ^StreamsBuilder (add-state-stores this (StreamsBuilder.))
+          input-stream (.stream builder ^Collection input-topics)
+          ;; The following mutates the builder as a side-effect.
+          _ (process-input-stream this input-stream)
+          topology (.build builder)
           streams (KafkaStreams. topology config)]
       (.start streams)
       (assoc this :streams streams)))
   (stop [this]
     (try
-      (.close (:streams this))
+      (.close ^KafkaStreams (:streams this))
       (catch Throwable t
         (common/report-throwable this t "Caught exception closing streams" {:app-id app-id})))
     this))
