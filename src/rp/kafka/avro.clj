@@ -118,8 +118,8 @@
     Schema$Type/RECORD
     (reduce-kv
      (fn [record k v]
-       (let [k ^String (avro-friendly-name k)
-             s ^Schema (some-> (.getField ^Schema schema k)
+       (let [k (avro-friendly-name k)
+             s (some-> (.getField ^Schema schema k)
                        (as-> f (.schema ^Schema$Field f)))]
          (doto ^GenericData$Record record
            (.put ^String k ^Object (->java (or s k) v)))))
