@@ -9,11 +9,16 @@
            [org.apache.kafka.streams KafkaStreams StreamsBuilder StreamsConfig Topology KeyValue]
            [org.apache.kafka.streams.errors DeserializationExceptionHandler LogAndContinueExceptionHandler]
            [org.apache.kafka.streams.processor Processor ProcessorContext ProcessorSupplier]
-           [org.apache.kafka.streams.kstream KStream Printed Initializer Aggregator Merger TimeWindows SessionWindows KeyValueMapper Suppressed Suppressed$BufferConfig Materialized Predicate]
+           [org.apache.kafka.streams.kstream KStream KTable Printed Initializer Aggregator Merger Windows TimeWindows SessionWindows KeyValueMapper Suppressed Suppressed$BufferConfig Materialized Predicate KGroupedStream KGroupedTable SessionWindowedKStream TimeWindowedKStream]
            GenericPrimitiveAvroSerde
            [io.confluent.kafka.serializers AbstractKafkaAvroSerDeConfig KafkaAvroDeserializer]
            [java.time Duration]
            [java.util Collection Properties]))
+
+(defn- str-array
+  "Helper for passing a vararg of Strings to a Java method."
+  [strings]
+  (into-array String strings))
 
 ;;
 ;; Handy stuff "borrowed" from https://github.com/FundingCircle/jackdaw/blob/master/src/jackdaw/streams/lambdas.clj
@@ -114,6 +119,7 @@
        (avro/->java agg-schema new-agg)))))
 
 (defn time-windows
+  ^TimeWindows
   ;; Hopping (overlapping) windows, where advance-by-duration is less than window-duration.
   ([^Duration window-duration ^Duration advance-by-duration]
    (let [windows (TimeWindows/of window-duration)]
@@ -125,8 +131,23 @@
    (time-windows window-duration nil)))
 
 (defn session-windows
+  ^SessionWindows
   [^Duration inactivity-duration]
   (SessionWindows/with inactivity-duration))
+
+(defmulti grace
+  (fn [windows duration]
+    (class windows)))
+
+(defmethod grace TimeWindows
+  ^TimeWindows
+  [^TimeWindows windows ^Duration duration]
+  (.grace windows duration))
+
+(defmethod grace SessionWindows
+  ^SessionWindows
+  [^SessionWindows windows ^Duration duration]
+  (.grace windows duration))
 
 ;; Returns a value for passing to KTable#suppress method
 ;; See https://kafka.apache.org/21/javadoc/org/apache/kafka/streams/kstream/Suppressed.html#untilWindowCloses-org.apache.kafka.streams.kstream.Suppressed.StrictBufferConfig-
@@ -134,6 +155,7 @@
 ;; FIXME: When "spill to disk" buffer config is available, use that instead of "unbounded".
 ;; https://issues.apache.org/jira/browse/KAFKA-7224
 (defn suppressed-until-window-closes
+  ^Suppressed
   []
   (Suppressed/untilWindowCloses
    (Suppressed$BufferConfig/unbounded)))
@@ -148,17 +170,129 @@
                        (doto (GenericPrimitiveAvroSerde.)
                          (.configure config false)))))
 
+;;
+;; Wrappers for Streams API methods
+;; (only the subset we've needed so far; add more as we necessary)
+;; These are intended for use inside your component's process-input-stream fn.
+;;
 
-(defn- str-array
-  "Helper for passing a vararg of non-nil Strings to a Java method."
-  [& strings]
-  (into-array String (filter identity strings)))
+(defn to
+  [^KStream kstream ^String topic-name]
+  (.to kstream topic-name))
+
+(defn to-stream
+  ^KStream
+  [^KTable ktable]
+  (.toStream ktable))
+
+;; Caution: This name shadows clojure.core/map in this NS
+(defn map
+  ^KStream
+  [^KStream kstream key-value-mapper-fn]
+  (.map kstream (key-value-mapper key-value-mapper-fn)))
+
+;; Caution: This name shadows clojure.core/filter in this NS
+(defn filter
+  ^KStream
+  [^KStream kstream pred-fn]
+  (.filter kstream (predicate pred-fn)))
+
+(defn filter-not
+  ^KStream
+  [^KStream kstream pred-fn]
+  (.filterNot kstream (predicate pred-fn)))
+
+(defn group-by-key
+  ^KGroupedStream
+  [^KStream kstream]
+  (.groupByKey kstream))
+
+(defmulti windowed-by
+  (fn [kgrouped-stream windows]
+    (class windows)))
+
+(defmethod windowed-by TimeWindows
+  ^TimeWindowedKStream
+  [^KGroupedStream kgrouped-stream ^TimeWindows windows]
+  (.windowedBy kgrouped-stream windows))
+
+(defmethod windowed-by SessionWindows
+  ^SessionWindowedKStream
+  [^KGroupedStream kgrouped-stream ^SessionWindows windows]
+  (.windowedBy kgrouped-stream windows))
+
+;; Note: This one's interesting as it can be called on a few different classes and has multiple arities.
+(defmulti aggregate
+  (fn [target & more]
+    [(class target) (count more)]))
+
+(defmethod aggregate [KGroupedStream 3]
+  ^KTable
+  [^KGroupedStream target ^Initializer initializer ^Aggregator aggregator ^Materialized materialized]
+  (.aggregate target initializer aggregator materialized))
+
+(defmethod aggregate [KGroupedStream 2]
+  ^KTable
+  [^KGroupedStream target ^Initializer initializer ^Aggregator aggregator]
+  (.aggregate target initializer aggregator))
+
+(defmethod aggregate [SessionWindowedKStream 4]
+  ^KTable
+  [^SessionWindowedKStream target ^Initializer initializer ^Aggregator aggregator ^Merger merger ^Materialized materialized]
+  (.aggregate target initializer aggregator merger materialized))
+
+(defmethod aggregate [SessionWindowedKStream 3]
+  ^KTable
+  [^SessionWindowedKStream target ^Initializer initializer ^Aggregator aggregator ^Merger merger]
+  (.aggregate target initializer aggregator merger))
+
+(defmethod aggregate [TimeWindowedKStream 3]
+  ^KTable
+  [^TimeWindowedKStream target ^Initializer initializer ^Aggregator aggregator ^Materialized materialized]
+  (.aggregate target initializer aggregator materialized))
+
+(defmethod aggregate [TimeWindowedKStream 2]
+  ^KTable
+  [^TimeWindowedKStream target ^Initializer initializer ^Aggregator aggregator]
+  (.aggregate target initializer aggregator))
+
+(defmethod aggregate [KGroupedTable 4]
+  ^KTable
+  [^KGroupedTable target ^Initializer initializer ^Aggregator adder ^Aggregator subtractor ^Materialized materialized]
+  (.aggregate target initializer adder subtractor materialized))
+
+(defmethod aggregate [KGroupedTable 3]
+  ^KTable
+  [^KGroupedTable target ^Initializer initializer ^Aggregator adder ^Aggregator subtractor]
+  (.aggregate target initializer adder subtractor))
+
+(defn suppress
+  ^KTable
+  [^KTable ktable ^Suppressed suppressed]
+  (.suppress ktable suppressed))
 
 (defn transform
-  [^KStream kstream component transformer-key]
-  (.transform kstream
-              (transformer/transformer-supplier component transformer-key)
-              (str-array (get-in component [:transformers transformer-key :store-name]))))
+  ^KStream
+  [kstream transformer-supplier store-names]
+  (.transform ^KStream kstream
+              ^TransformerSupplier transformer-supplier
+              (str-array store-names)))
+
+;;
+;; End of Streams API method wrappers
+;;
+
+;; This function is intended to be used in a process-input-stream call,
+;; but instead of wrapping a Streams DSL method (`.transform`) directly
+;; it relies on the idea of a :transformers configuration map at the component-level.
+;; See rp.kafka.kafka-transformer for more detail.
+(defn run-transformer
+  ^KStream
+  [kstream component transformer-key]
+  (let [store-name (get-in component [:transformers transformer-key :store-name])]
+    (transform kstream
+               (transformer/transformer-supplier component transformer-key)
+               (and store-name [store-name]))))
 
 (defn- add-state-stores
   [{:keys [transformers] :as component} ^StreamsBuilder builder]
