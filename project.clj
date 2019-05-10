@@ -1,4 +1,4 @@
-(defproject com.rentpath/rp-kafka-clj "0.0.5"
+(defproject com.rentpath/rp-kafka-clj "0.0.6-SNAPSHOT"
   :description "Generic Clojure Kafka components and utils"
   :url "https://gitthub.com/rentpath/rp-kafka-clj"
   :license {:name "Eclipse Public License"
